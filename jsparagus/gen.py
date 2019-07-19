@@ -494,12 +494,12 @@ def expand_optional_symbols_in_rhs(rhs, grammar, empties, start_index=0):
 
     for expanded, r in expand_optional_symbols_in_rhs(rhs, grammar, empties, i + 1):
         rhs_inner = rhs[i].inner if is_optional(rhs[i]) else rhs[i]
+        # without rhs[i]
+        r2 = r.copy()
+        r2[i] = replacement
+        yield rhs[start_index:i] + expanded, r2
         # with rhs[i]
         yield rhs[start_index:i] + [rhs_inner] + expanded, r
-        r = r.copy()
-        r[i] = replacement
-        # without rhs[i]
-        yield rhs[start_index:i] + expanded, r
 
 
 def expand_all_optional_elements(grammar):
