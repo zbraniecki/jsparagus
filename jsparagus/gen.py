@@ -129,7 +129,7 @@ def check_cycle_free(grammar):
     for orig in grammar.nonterminals:
         direct_produces[orig] = set()
         for source_production in grammar.nonterminals[orig]:
-            for rhs, _r in expand_optional_symbols_in_rhs(source_production.body):
+            for rhs, _r in expand_optional_symbols_in_rhs(source_production.body, grammar, empties):
                 result = []
                 all_possibly_empty_so_far = True
                 # If we break out of the following loop, that means it turns
@@ -182,10 +182,12 @@ def check_lookahead_rules(grammar):
     If there are any offending lookahead rules, throw a ValueError.
     """
 
+    empties = empty_nt_set(grammar)
+
     check_cycle_free(grammar)
     for nt in grammar.nonterminals:
         for source_production in grammar.nonterminals[nt]:
-            for rhs, _r in expand_optional_symbols_in_rhs(source_production.body):
+            for rhs, _r in expand_optional_symbols_in_rhs(source_production.body, grammar, empties):
                 # XXX BUG: The next if-condition is insufficient, since it
                 # fails to detect a lookahead restriction followed by a
                 # nonterminal that can match the empty string.
@@ -457,10 +459,10 @@ def follow_sets(grammar, prods_with_indexes_by_nt, start_set_cache):
 #
 # There may be many productions in a grammar that all have the same `nt` and `index`
 # because they were all produced from the same source production.
-Prod = collections.namedtuple("Prod", "nt index rhs removals action")
+Prod = collections.namedtuple("Prod", "nt index rhs action")
 
 
-def expand_optional_symbols_in_rhs(rhs, start_index=0):
+def expand_optional_symbols_in_rhs(rhs, grammar, empties, start_index=0):
     """Expand a sequence that may contain optional symbols into sequences that don't.
 
     rhs is a list of symbols, possibly containing optional elements. This
@@ -474,18 +476,29 @@ def expand_optional_symbols_in_rhs(rhs, start_index=0):
     yields the two pairs `(["if"], [1])` and `["if", "else"], []`.
     """
 
+    replacement = None
     for i in range(start_index, len(rhs)):
         if is_optional(rhs[i]):
+            if grammar.is_nt(rhs[i].inner) and rhs[i].inner in empties:
+                # If this is already possibly-empty in the input grammar, it's an
+                # error! The grammar is ambiguous.
+                raise ValueError("ambiguous grammar: {} is ambiguous because {} can match the empty string"
+                                 .format(grammar.element_to_str(rhs[i]), grammar.element_to_str(rhs[i].inner)))
+            break
+        elif grammar.is_nt(rhs[i]) and rhs[i] in empties:
+            replacement = empties[rhs[i]]
             break
     else:
-        yield rhs[start_index:], []
+        yield rhs[start_index:], {}
         return
 
-    for expanded, r in expand_optional_symbols_in_rhs(rhs, i + 1):
-        # without rhs[i]
-        yield rhs[start_index:i] + expanded, [i] + r
+    for expanded, r in expand_optional_symbols_in_rhs(rhs, grammar, empties, i + 1):
+        rhs_inner = rhs[i].inner if is_optional(rhs[i]) else rhs[i]
         # with rhs[i]
-        yield rhs[start_index:i] + [rhs[i].inner] + expanded, r
+        yield rhs[start_index:i] + [rhs_inner] + expanded, r
+        r[i] = replacement
+        # without rhs[i]
+        yield rhs[start_index:i] + expanded, r
 
 
 def expand_all_optional_elements(grammar):
@@ -497,6 +510,8 @@ def expand_all_optional_elements(grammar):
     """
     expanded_grammar = {}
 
+    empties = empty_nt_set(grammar)
+
     # Put all the productions in one big list, so each one has an index.
     # We will use the indices in the action table (as arguments to Reduce actions).
     prods = []
@@ -505,11 +520,11 @@ def expand_all_optional_elements(grammar):
     for nt in grammar.nonterminals:
         expanded_grammar[nt] = []
         for prod_index, p in enumerate(grammar.nonterminals[nt]):
-            for expanded_rhs, removals in expand_optional_symbols_in_rhs(p.body):
+            for expanded_rhs, removals in expand_optional_symbols_in_rhs(p.body, grammar, empties):
                 def adjust_reduce_expr(expr):
                     if isinstance(expr, int):
                         if expr in removals:
-                            return None
+                            return removals[expr]
                         was_optional = is_optional(p.body[expr])
                         expr -= sum(1 for r in removals if r < expr)
                         if was_optional:
@@ -535,7 +550,7 @@ def expand_all_optional_elements(grammar):
                 expanded_grammar[nt].append(
                     Production(nt=p.nt, body=expanded_rhs, action=adjusted_action))
                 prods.append(Prod(nt, prod_index, expanded_rhs,
-                                  removals, adjusted_action))
+                                  adjusted_action))
                 prods_with_indexes_by_nt[nt].append(
                     (len(prods) - 1, expanded_rhs))
 
@@ -1254,7 +1269,7 @@ def analyze_states(context, prods, *, verbose=False, progress=False):
     init_state_map = {}
     for init_nt in context.grammar.init_nts:
         init_prod_index = prods.index(
-            Prod(init_nt, 0, [init_nt.goal], removals=[], action="accept"))
+            Prod(init_nt, 0, [init_nt.goal], action="accept"))
         start_item = context.make_lr_item(init_prod_index,
                                           0,
                                           lookahead=None,
@@ -1308,7 +1323,7 @@ def generate_parser(out, grammar, *, target='python',
     grammar = expand_function_nonterminals(grammar)
     check_cycle_free(grammar)
     check_lookahead_rules(grammar)
-    grammar = make_epsilon_free_step_1(grammar)
+    #grammar = make_epsilon_free_step_1(grammar)
     grammar, prods, prods_with_indexes_by_nt = expand_all_optional_elements(
         grammar)
     grammar = make_epsilon_free_step_2(grammar)
